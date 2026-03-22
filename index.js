@@ -42,6 +42,11 @@ function estimateTimeComplexity(code) {
   return `O(n^${maxDepth})`;
 }
 
+// Root Health Check endpoint for Render/Deployment
+app.get('/', (req, res) => {
+  res.send('Smart Code Debugger Backend is running!');
+});
+
 app.post('/analyze', async (req, res) => {
   try {
     const { code, language } = req.body;
