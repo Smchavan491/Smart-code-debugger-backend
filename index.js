@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai'; // ✅ CHANGED
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -19,15 +19,13 @@ const apiKey = process.env.GEMINI_API_KEY?.trim();
 const isRealKey = apiKey && apiKey !== 'your_api_key_here';
 console.log(`Backend: GEMINI_API_KEY is ${isRealKey ? 'configured' : 'NOT CONFIGURED'}`);
 
-const ai = isRealKey ? new GoogleGenerativeAI(apiKey) : null; // ✅ CHANGED
+const ai = isRealKey ? new GoogleGenAI({ apiKey }) : null;
 
 // Manual logic for time complexity based strictly on loop counting
 function estimateTimeComplexity(code) {
   if (!code) return "O(1)";
-  
   let maxDepth = 0;
   let currentDepth = 0;
-  
   const lines = code.split('\n');
   for (const line of lines) {
     const trimmed = line.trim();
@@ -39,7 +37,6 @@ function estimateTimeComplexity(code) {
       if (currentDepth > 0) currentDepth--;
     }
   }
-
   if (maxDepth === 0) return "O(1)";
   if (maxDepth === 1) return "O(n)";
   if (maxDepth === 2) return "O(n^2)";
@@ -89,13 +86,21 @@ app.post('/analyze', async (req, res) => {
     `;
 
     console.log('Backend: Calling AI...');
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: 'application/json',
+      }
+    });
 
-    // ✅ CHANGED ONLY THIS BLOCK
-    const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
+    const candidateText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!candidateText) {
+      console.error('Backend: No candidates in AI response:', JSON.stringify(response, null, 2));
+      throw new Error("AI failed to return valid analysis text.");
+    }
 
-    let rawText = response.text(); // ✅ CHANGED
+    let rawText = candidateText;
 
     try {
       console.log('Backend: Parsing response JSON...');
@@ -119,7 +124,7 @@ app.post('/analyze', async (req, res) => {
       });
 
     } catch (parseError) {
-      console.error('Backend: Parse Error. Raw response:', rawText); // ✅ CHANGED
+      console.error('Backend: Parse Error. Raw response:', rawText);
       res.status(500).json({ error: 'Failed to parse AI response: ' + parseError.message });
     }
 
@@ -130,6 +135,6 @@ app.post('/analyze', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
