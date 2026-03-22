@@ -9,6 +9,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Health Check route for Render
+app.get('/', (req, res) => {
+  res.send('Smart Code Debugger API is running!');
+});
+
 // Initialize Google Gen AI
 const apiKey = process.env.GEMINI_API_KEY?.trim();
 const isRealKey = apiKey && apiKey !== 'your_api_key_here';
@@ -41,11 +46,6 @@ function estimateTimeComplexity(code) {
   if (maxDepth === 3) return "O(n^3)";
   return `O(n^${maxDepth})`;
 }
-
-// Root Health Check endpoint for Render/Deployment
-app.get('/', (req, res) => {
-  res.send('Smart Code Debugger Backend is running!');
-});
 
 app.post('/analyze', async (req, res) => {
   try {
