@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai'; // ✅ CHANGED
 
 dotenv.config();
 
@@ -14,20 +14,18 @@ const apiKey = process.env.GEMINI_API_KEY?.trim();
 const isRealKey = apiKey && apiKey !== 'your_api_key_here';
 console.log(`Backend: GEMINI_API_KEY is ${isRealKey ? 'configured' : 'NOT CONFIGURED'}`);
 
-const ai = isRealKey ? new GoogleGenAI({ apiKey }) : null;
+const ai = isRealKey ? new GoogleGenerativeAI(apiKey) : null; // ✅ CHANGED
 
 // Manual logic for time complexity based strictly on loop counting
 function estimateTimeComplexity(code) {
   if (!code) return "O(1)";
   
-  // Basic heuristic: count nested loops (for, while)
   let maxDepth = 0;
   let currentDepth = 0;
   
   const lines = code.split('\n');
   for (const line of lines) {
     const trimmed = line.trim();
-    // Simplified depth tracking
     if (trimmed.match(/^(for|while)\s*\(|\s(for|while)\s*\(/)) {
       currentDepth++;
       if (currentDepth > maxDepth) maxDepth = currentDepth;
@@ -53,7 +51,6 @@ app.post('/analyze', async (req, res) => {
       return res.status(400).json({ error: 'Code and language are required' });
     }
 
-    // 1. Calculate time complexity manually
     const complexity = estimateTimeComplexity(code);
 
     if (!ai) {
@@ -67,7 +64,6 @@ app.post('/analyze', async (req, res) => {
       });
     }
 
-    // 2. Query Gemini for bugs and optimizations
     const prompt = `
       You are an expert ${language} code reviewer. Analyze the following code.
       1. IGNORE header files, minor style issues, and standard imports.
@@ -88,39 +84,15 @@ app.post('/analyze', async (req, res) => {
     `;
 
     console.log('Backend: Calling AI...');
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        responseMimeType: 'application/json',
-        // Optional: reduce safety thresholds for code analysis to avoid false blocks
-        safetySettings: [
-          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-        ]
-      }
-    });
+
+    // ✅ CHANGED ONLY THIS BLOCK
+    const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+
+    let rawText = response.text(); // ✅ CHANGED
 
     try {
-      // Robust text extraction for @google/genai SDK
-      let rawText = '';
-      if (response.candidates && response.candidates[0] && response.candidates[0].content && response.candidates[0].content.parts) {
-        rawText = response.candidates[0].content.parts[0].text;
-      } else if (typeof response.text === 'function') {
-        rawText = response.text();
-      } else if (response.text) {
-        rawText = response.text;
-      }
-      
-      if (!rawText) {
-          // Check for block reason
-          const feedback = response.promptFeedback || (response.candidates && response.candidates[0] && response.candidates[0].finishReason);
-          console.error('Backend: No candidates returned. Feedback/FinishReason:', feedback);
-          throw new Error("Empty response from AI. It might have been blocked or failed to generate.");
-      }
-
       console.log('Backend: Parsing response JSON...');
       const startIdx = rawText.indexOf('{');
       const endIdx = rawText.lastIndexOf('}');
@@ -133,7 +105,6 @@ app.post('/analyze', async (req, res) => {
       
       const scoreValue = resultData.score?.toString() || "10";
       
-      // Combine manual complexity with LLM response
       res.json({
         bugs: resultData.bugs || "No concerns found.",
         optimization: resultData.optimization || "Code is well-optimized.",
@@ -143,7 +114,7 @@ app.post('/analyze', async (req, res) => {
       });
 
     } catch (parseError) {
-      console.error('Backend: Parse Error. Raw response:', JSON.stringify(response, null, 2));
+      console.error('Backend: Parse Error. Raw response:', rawText); // ✅ CHANGED
       res.status(500).json({ error: 'Failed to parse AI response: ' + parseError.message });
     }
 
