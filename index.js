@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import axios from 'axios';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -9,132 +10,276 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Health Check route for Render
-app.get('/', (req, res) => {
-  res.send('Smart Code Debugger API is running!');
-});
+// In-memory caching system
+const cache = new Map();
 
-// Initialize Google Gen AI
-const apiKey = process.env.GEMINI_API_KEY?.trim();
-const isRealKey = apiKey && apiKey !== 'your_api_key_here';
-console.log(`Backend: GEMINI_API_KEY is ${isRealKey ? 'configured' : 'NOT CONFIGURED'}`);
-
-const ai = isRealKey ? new GoogleGenAI({ apiKey }) : null;
-
-// Manual logic for time complexity based strictly on loop counting
-function estimateTimeComplexity(code) {
+// ---------------- TIME COMPLEXITY ----------------
+function estimateTimeComplexity(code, language = "javascript") {
   if (!code) return "O(1)";
   let maxDepth = 0;
   let currentDepth = 0;
   const lines = code.split('\n');
+  const isPython = (language || '').toLowerCase() === 'python';
+  
   for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.match(/^(for|while)\s*\(|\s(for|while)\s*\(/)) {
-      currentDepth++;
-      if (currentDepth > maxDepth) maxDepth = currentDepth;
-    }
-    if (trimmed.includes('}')) {
-      if (currentDepth > 0) currentDepth--;
+    if (isPython) {
+      if (!line.trim() || line.trim().startsWith('#')) continue;
+      // Simple indent estimation for Python (assumes 4 spaces)
+      const indent = line.search(/\S|$/);
+      currentDepth = Math.floor(indent / 4);
+      if (line.trim().match(/^(for|while)\b/)) {
+        currentDepth++;
+        if (currentDepth > maxDepth) maxDepth = currentDepth;
+      }
+    } else {
+      const trimmed = line.trim();
+      if (
+        trimmed.match(/^(for|while|do)\b/) ||
+        trimmed.includes('.map(') ||
+        trimmed.includes('.forEach(') ||
+        trimmed.includes('.filter(') ||
+        trimmed.includes('.reduce(')
+      ) {
+        currentDepth++;
+        if (currentDepth > maxDepth) maxDepth = currentDepth;
+      }
+      if (trimmed.includes('}')) {
+        if (currentDepth > 0) currentDepth--;
+      }
     }
   }
+  
   if (maxDepth === 0) return "O(1)";
   if (maxDepth === 1) return "O(n)";
   if (maxDepth === 2) return "O(n^2)";
-  if (maxDepth === 3) return "O(n^3)";
   return `O(n^${maxDepth})`;
 }
+
+// ---------------- FALLBACK ----------------
+function fallbackAnalysis(code, language) {
+  return {
+    bugs: "⚠️ AI unavailable. No critical bugs detected, but verify logic manually.",
+    optimization: "Consider improving logic and reducing nested loops.",
+    complexity: estimateTimeComplexity(code, language),
+    score: "6",
+    qualityScore: 6,
+    problematicLines: [],
+    analyzedBy: "fallback"
+  };
+}
+
+// ---------------- SAFE JSON PARSER ----------------
+function parseJSON(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error("Invalid JSON from AI");
+  }
+}
+
+// ---------------- ROUTES ----------------
+app.get('/', (req, res) => {
+  res.send('🚀 Backend Running (Groq Fixed)');
+});
 
 app.post('/analyze', async (req, res) => {
   try {
     const { code, language } = req.body;
-    console.log(`Backend: Analyzing ${language} code (${code ? code.length : 0} chars)`);
 
     if (!code || !language) {
-      return res.status(400).json({ error: 'Code and language are required' });
+      return res.status(400).json({ error: 'Code and language required' });
     }
 
-    const complexity = estimateTimeComplexity(code);
+    const cacheKey = crypto
+      .createHash('md5')
+      .update(language + code)
+      .digest('hex');
 
-    if (!ai) {
-      console.log('No valid GEMINI_API_KEY found, returning mock response.');
-      return res.json({
-        bugs: "Potential infinite loop detected. Missing bracket.",
-        optimization: "Cache computations and avoid nested loops where possible.",
-        complexity: complexity,
-        score: "6",
-        qualityScore: 6
-      });
+    // (optional cache disabled for testing)
+    // if (cache.has(cacheKey)) return res.json(cache.get(cacheKey));
+
+    const GROQ_KEY = process.env.GROQ_API_KEY;
+
+    if (!GROQ_KEY) {
+      return res.json(fallbackAnalysis(code, language));
     }
 
     const prompt = `
-      You are an expert ${language} code reviewer. Analyze the following code.
-      1. IGNORE header files, minor style issues, and standard imports.
-      2. FOCUS ONLY on logical bugs, critical faults, and better algorithmic suggestions.
-      3. Give short, direct, and clear answers.
+You are a senior software engineer and static code analysis system.
 
-      Your response MUST be valid JSON, with exactly the following keys:
-      - "bugs": A short string exposing only actual logical bugs or critical faults.
-      - "optimization": A short suggestion for a better algorithm or better approach.
-      - "score": A numeric score from 1-10 based on code quality.
-      
-      Note: We handle time complexity externally, so do not output it.
+The input code may come from various sources such as:
+- Competitive programming platforms (LeetCode, Codeforces, CodeChef, HackerRank)
+- Real-world projects
+- Browser extensions (possibly incomplete or messy code)
 
-      Code to analyze:
-      \`\`\`${language}
-      ${code}
-      \`\`\`
-    `;
+The programming language MAY NOT be provided. You MUST detect it yourself.
 
-    console.log('Backend: Calling AI...');
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        responseMimeType: 'application/json',
+-------------------------------
+🔍 STEP 1: LANGUAGE DETECTION
+-------------------------------
+Detect the programming language using syntax patterns:
+
+- C++ → #include, vector<>, std::, ->, pointers (*)
+- Java → public class, System.out.println, main(String[])
+- Python → def, indentation, no semicolons
+- JavaScript → function, console.log, =>
+- TypeScript → interface, type annotations (: string, : number)
+- C → printf, scanf, #include <stdio.h>
+
+Return the detected language in output.
+
+STRICT RULE:
+- Never confuse languages
+- Never give errors for a different language
+- If unsure → return "unknown"
+
+-------------------------------
+🧠 STEP 2: ANALYSIS RULES
+-------------------------------
+Analyze the code ONLY based on the detected language.
+
+Focus ONLY on:
+1. Logical bugs (wrong output, infinite loops, crashes)
+2. Critical runtime issues
+3. Algorithmic inefficiencies
+
+IGNORE:
+- Minor style issues
+- Formatting
+- Naming conventions
+
+-------------------------------
+⚠️ BUG DETECTION RULES
+-------------------------------
+- Report ONLY real bugs
+- Do NOT invent problems
+- If code is correct → say "No critical bugs found"
+
+-------------------------------
+⚡ OPTIMIZATION RULES
+-------------------------------
+- Suggest improvements ONLY if meaningful
+- Focus on time complexity improvements
+- Avoid generic advice
+- If the algorithm is already optimal → exactly say "No optimizations needed. The code is already optimally written."
+- If the Time Complexity is optimal → do NOT suggest alternative algorithms.
+
+-------------------------------
+📊 COMPLEXITY RULES
+-------------------------------
+- Provide Big-O time complexity
+- Use standard notation:
+  n = size of input
+  m = rows
+  L = recursion depth / string length
+
+-------------------------------
+🛑 ANTI-HALLUCINATION RULES
+-------------------------------
+- Do NOT mention other languages
+- Do NOT assume missing context incorrectly
+- Do NOT generate fake errors
+- Do NOT explain outside JSON
+
+If analysis is uncertain:
+→ return safe response with best effort
+
+-------------------------------
+📦 OUTPUT FORMAT (STRICT JSON)
+-------------------------------
+Return ONLY this JSON:
+
+{
+  "detectedLanguage": "",
+  "bugs": "",
+  "optimization": "",
+  "complexity": "",
+  "score": "8/10",
+  "qualityScore": 8,
+  "problematicLines": []
+}
+
+-------------------------------
+⭐ QUALITY SCORE RULE
+-------------------------------
+- 9–10 → optimal code
+- 7–8 → good but minor improvements possible
+- 5–6 → moderate issues
+- <5 → serious issues
+
+-------------------------------
+📌 FINAL INSTRUCTION
+-------------------------------
+- Output ONLY JSON
+- No markdown
+- No explanation outside JSON
+
+-------------------------------
+CODE TO ANALYZE:
+${code}`;
+
+
+    console.log("🚀 Calling Groq...");
+
+    const response = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: 'llama-3.3-70b-versatile', // 🔥 THE SMARTEST MODEL FOR EXPERT ANALYSES
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a strict code analyzer. You MUST return ONLY valid JSON matching the exact schema requested. Do not output anything else.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.1,
+        max_tokens: 2048, // Prevent JSON cutoff with large models
+        response_format: { type: "json_object" }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GROQ_KEY}`,
+          'Content-Type': 'application/json'
+        }
       }
-    });
+    );
 
-    const candidateText = response.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!candidateText) {
-      console.error('Backend: No candidates in AI response:', JSON.stringify(response, null, 2));
-      throw new Error("AI failed to return valid analysis text.");
-    }
+    const raw = response.data.choices?.[0]?.message?.content;
 
-    let rawText = candidateText;
+    console.log("🧠 AI RAW:", raw);
 
-    try {
-      console.log('Backend: Parsing response JSON...');
-      const startIdx = rawText.indexOf('{');
-      const endIdx = rawText.lastIndexOf('}');
-      if (startIdx !== -1 && endIdx !== -1) {
-          rawText = rawText.substring(startIdx, endIdx + 1);
-      }
+    const data = parseJSON(raw);
 
-      const resultData = JSON.parse(rawText);
-      console.log('Backend: Parse successful');
-      
-      const scoreValue = resultData.score?.toString() || "10";
-      
-      res.json({
-        bugs: resultData.bugs || "No concerns found.",
-        optimization: resultData.optimization || "Code is well-optimized.",
-        complexity: complexity,
-        score: scoreValue,
-        qualityScore: parseInt(scoreValue) || 10
-      });
+    const result = {
+      bugs: data.bugs || "No bugs found",
+      optimization: data.optimization || "Code is fine",
+      complexity: data.complexity || estimateTimeComplexity(code, language),
+      score: data.score?.toString() || "9",
+      qualityScore: parseInt(data.qualityScore) || 9,
+      problematicLines: Array.isArray(data.problematicLines)
+        ? data.problematicLines.map(Number).filter(n => !isNaN(n))
+        : [],
+      analyzedBy: "llama-3.3-70b-versatile"
+    };
 
-    } catch (parseError) {
-      console.error('Backend: Parse Error. Raw response:', rawText);
-      res.status(500).json({ error: 'Failed to parse AI response: ' + parseError.message });
-    }
+    cache.set(cacheKey, result);
 
-  } catch (error) {
-    console.error('Backend: Error during analysis:', error);
-    res.status(500).json({ error: error.message || 'An error occurred during code analysis' });
+    res.json(result);
+
+  } catch (err) {
+    console.error("❌ FULL ERROR:", err.response?.data || err.message); // ✅ DEBUG FIX
+    res.json(fallbackAnalysis(req.body.code, req.body.language));
   }
 });
 
+// ---------------- SERVER ----------------
 const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on ${PORT}`);
 });
